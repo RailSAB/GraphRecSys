@@ -1,7 +1,7 @@
----
+<!-- ---
 title: "Graph-Based Movie Recommender System: A Comprehensive Study"
 date: 2025-12-02
----
+--- -->
 
 # Graph-Based Movie Recommender System: A Comprehensive Study
 
