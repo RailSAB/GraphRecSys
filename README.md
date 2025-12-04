@@ -145,7 +145,7 @@ X = hstack([tfidf_matrix, genres_m, keywords_m, adult_mask, numeric_m])
 
 #### 3.1.4 Cosine Similarity Graph
 
-We construct a kNN graph using cosine distance on the combined sparse features. For each movie, we connect to its top-$k$ neighbors (excluding self), creating edges with weights $w_{ij} = 1 - d_{ij}$ where $d_{ij}$ is the cosine distance between movies $i$ and $j$. We use $k=20$ neighbors per node.
+We construct a kNN graph using cosine distance on the combined sparse features. For each movie, we connect to its top $k$ neighbors (excluding self), creating edges with weights $w_{ij} = 1 - d_{ij}$ where $d_{ij}$ is the cosine distance between movies $i$ and $j$. We use $k=20$ neighbors per node.
 
 ```python
 from sklearn.neighbors import NearestNeighbors
