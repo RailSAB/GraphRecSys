@@ -363,7 +363,7 @@ def build_subgraph_for_users(
 
 #### 3.1.5 Cosine Similarity Graph
 
-We construct a kNN graph using cosine distance on the combined sparse features. For each movie, we connect to its top-$k$ neighbors (excluding self), creating edges with weights $w_{ij} = 1 - d_{ij}$ where $d_{ij}$ is the cosine distance between movies $i$ and $j$. We use $k=20$ neighbors per node.
+We construct a kNN graph using cosine distance on the combined sparse features. For each movie, we connect to its top $k$ neighbors (excluding self), creating edges with weights $w_{ij} = 1 - d_{ij}$ where $d_{ij}$ is the cosine distance between movies $i$ and $j$. We use $k=20$ neighbors per node.
 
 ```python
 from sklearn.neighbors import NearestNeighbors
@@ -398,9 +398,9 @@ The algorithm proceeds in four steps:
 1. **Local connectivity ($\rho_i$)**: For each node $i$, set $\rho_i$ to the smallest non-zero neighbor distance. This guarantees at least one strong local edge.
 
 2. **Per-node scale ($\sigma_i$)**: Find $\sigma_i$ via binary search such that the total affinity "mass" around $i$ equals $\log_2(k)$:
-   ```math
-   \sum_j \exp\left(-\frac{d_{ij} - \rho_i}{\sigma_i}\right) \approx \log_2(k)
-   ```
+```math
+\sum_j \exp\left(-\frac{d_{ij} - \rho_i}{\sigma_i}\right) \approx \log_2(k)
+```
    The $\log_2(k)$ target acts as a compact, stable effective neighborhood size that prevents over-smoothing while preserving strong links across regions of different density.
 
 3. **Directional fuzzy weights**: Compute $w_{ij} = \exp\left(-\frac{d_{ij} - \rho_i}{\sigma_i}\right)$
