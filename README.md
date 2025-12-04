@@ -484,8 +484,6 @@ Key parameters to consider for **the similarity graphs**:
 
 Reproducibility: scikit-learn's `NearestNeighbors` is deterministic given inputs; randomness primarily arises from sampling and floating-point non-determinism across different BLAS backends.
 
-<! TODO: ADD PICTURE>
-
 Key parameters to consider for **the heterogeneous graph**:
 - **num_negatives**: the parameter should be chosen according to the amount of movies. The higher value leads to more hits and higher computational complexity.
 - **max_users**: the maximal amount of the validation set. The parameter also affects the metrics values. The higher value leads to more hits and higher computational complexity.
