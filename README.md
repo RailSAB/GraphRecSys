@@ -19,7 +19,7 @@ In this work, we present a comprehensive study of graph-based approaches for mov
 
 The prediction task we address is link prediction — specifically, predicting which user-movie links are likely to be favorable. We evaluate our approaches using standard classification metrics, such as accuracy, F1, ROC-AUC, etc. considering a movie as relevant if the user rated it 4 or 5 stars.
 
-We compare three distinct approaches: (1) a content-based method with Correct-and-Smooth refinement (CS), (2) a per-user rating (label) propagation method (PRC), and (3) Graph Neural Networks (GCN and GraphSAGE). Our experiments are conducted on two different graph constructions: a cosine similarity-based graph and a UMAP-style fuzzy similarity graph. Through this comprehensive evaluation, we provide insights into the relative strengths and weaknesses of each approach, offering practical guidance for practitioners working on graph-based recommendation systems.
+We compare three distinct approaches: (1) a content-based method with Correct-and-Smooth refinement (CS), (2) a per-user rating (label) propagation method (PRC), and (3) Graph Neural Networks (GCN and GraphSAGE). Our experiments are conducted on three different graph constructions: a cosine similarity-based graph, a UMAP-style fuzzy similarity graph, and a heterogeneous graph. Through this comprehensive evaluation, we provide insights into the relative strengths and weaknesses of each approach, offering practical guidance for practitioners working on graph-based recommendation systems.
 
 ![CNN and GCN Comparison](images/GCN_vs_CNN_overview.png)
 
@@ -74,11 +74,21 @@ We construct a weighted movie similarity graph using a homogeneous item-item par
 
 #### 3.1.1 Data Sources
 
-We use three data files:
+**For the similarity graphs we use three data files**:
 
 - `data/movies_metadata.csv`: core movie information including `id`, `title`, `adult`, `genres`, `overview`, `popularity`, `vote_average`, and `vote_count`
 - `data/keywords.csv`: movie-level keywords
 - `data/links.csv`: mapping between `movieId` (MovieLens) and `tmdbId` (TMDB id) for identifier alignment
+
+
+**For the heterogeneous graph we use**:
+
+- `data/movies_metadata.csv`: core movie information including `id`, `title`, `adult`, `genres`, `overview`, `popularity`, `vote_average`, and `vote_count`
+- `data/links.csv`: mapping between `movieId` (MovieLens) and `tmdbId` (TMDB id) for identifier alignment
+- `data/credits.csv`: information about the film cast and crew
+- `data/ratings.csv:`: user rating
+
+The full preprocessing pipeline for the HG is available on Google Colab: [HGDataPreparation](https://colab.research.google.com/drive/1J7NKthnYXFFrmy678yh-bdw0k_W3_ttf?usp=sharing)
 
 #### 3.1.2 Preprocessing and Normalization
 
@@ -143,7 +153,215 @@ numeric_m = scaler.fit_transform(numeric_features)
 X = hstack([tfidf_matrix, genres_m, keywords_m, adult_mask, numeric_m])
 ```
 
-#### 3.1.4 Cosine Similarity Graph
+#### 3.1.4 Heterogeneous Graph
+
+We construct mapping dictionaries to connect the relationships between nodes:
+
+```python
+movie_id_to_idx = {movie_id: idx for idx, movie_id in enumerate(df_connections_movie_features['movie_id'].unique())}
+user_id_to_idx = {user_id: idx for idx, user_id in enumerate(df_connections_user_stats['user_id'].unique())}
+director_id_to_idx = {director_id: idx for idx, director_id in
+                      enumerate(df_connections_directors['director_id'].unique())}
+actor_id_to_idx = {actor_id: idx for idx, actor_id in enumerate(df_connections_actors['actor_id'].unique())}
+genre_id_to_idx = {genre_id: idx for idx, genre_id in enumerate(df_connections_genres['genre_id'].unique())}
+```
+
+Then, in order to speed up the computations, we are considering `top-5000` users according to the amount of rated films. Such approach allows for obtaining more data to learn for each user. Using the function we create a subgraph of the original:
+
+```python
+def build_subgraph_for_users(
+        user_ids,
+        df_user_movie,
+        df_movie_features,
+        df_user_stats,
+        df_movie_genre,
+        df_movie_actor,
+        df_movie_director,
+        df_actors,
+        df_directors,
+        df_genres,
+        num_negatives=200
+):
+    selected_users = set(user_ids)
+    df_user_stats_sub = df_user_stats[df_user_stats['user_id'].isin(selected_users)].copy()
+
+    df_user_movie_sub = df_user_movie[df_user_movie['user_id'].isin(selected_users)].copy()
+    selected_movie_ids = set(df_user_movie_sub['movie_id'].unique())
+
+    df_movie_features_sub = df_movie_features[df_movie_features['movie_id'].isin(selected_movie_ids)].copy()
+    df_movie_genre_sub = df_movie_genre[df_movie_genre['movie_id'].isin(selected_movie_ids)].copy()
+    df_movie_actor_sub = df_movie_actor[df_movie_actor['movie_id'].isin(selected_movie_ids)].copy()
+    df_movie_director_sub = df_movie_director[df_movie_director['movie_id'].isin(selected_movie_ids)].copy()
+
+    selected_genre_ids = set(df_movie_genre_sub['genre_id'].unique())
+    selected_actor_ids = set(df_movie_actor_sub['actor_id'].unique())
+    selected_director_ids = set(df_movie_director_sub['director_id'].unique())
+
+    df_genres_sub = df_genres[df_genres['genre_id'].isin(selected_genre_ids)].copy()
+    df_actors_sub = df_actors[df_actors['actor_id'].isin(selected_actor_ids)].copy()
+    df_directors_sub = df_directors[df_directors['director_id'].isin(selected_director_ids)].copy()
+
+    print(f'\nSizes of filtered data:')
+    print(f'Users: {df_user_stats_sub.shape[0]}')
+    print(f'Movies: {df_movie_features_sub.shape[0]}')
+    print(f'User-movie links: {df_user_movie_sub.shape[0]}')
+    print(f'Actors: {df_actors_sub.shape[0]}')
+    print(f'Directors: {df_directors_sub.shape[0]}')
+    print(f'Genres: {df_genres_sub.shape[0]}')
+
+    scaler = StandardScaler()
+
+    movie_num_cols = ['vote_average', 'vote_count', 'popularity']
+    if len(df_movie_features_sub) > 0:
+        df_movie_features_sub[movie_num_cols] = scaler.fit_transform(
+            df_movie_features_sub[movie_num_cols].fillna(0)
+        )
+
+    user_num_cols = ['num_ratings', 'avg_rating', 'activity_days']
+    if len(df_user_stats_sub) > 0:
+        df_user_stats_sub[user_num_cols] = scaler.fit_transform(
+            df_user_stats_sub[user_num_cols].fillna(0)
+        )
+
+    if len(df_directors_sub) > 0:
+        df_directors_sub['total_films'] = scaler.fit_transform(
+            df_directors_sub[['total_films']].fillna(0)
+        )
+
+    actor_num_cols = ['total_films', 'avg_order']
+    if len(df_actors_sub) > 0:
+        df_actors_sub[actor_num_cols] = scaler.fit_transform(
+            df_actors_sub[actor_num_cols].fillna(0)
+        )
+
+    gender_encoder = OneHotEncoder(sparse_output=False, categories=[[0, 1, 2]], handle_unknown='ignore')
+    if len(df_directors_sub) > 0:
+        gender_dir_encoded = gender_encoder.fit_transform(df_directors_sub[['gender']])
+        gender_dir_df = pd.DataFrame(gender_dir_encoded,
+                                     columns=['gender_0', 'gender_1', 'gender_2'])
+        df_directors_sub = pd.concat([df_directors_sub.reset_index(drop=True),
+                                      gender_dir_df], axis=1)
+        df_directors_sub = df_directors_sub.drop('gender', axis=1)
+
+    if len(df_actors_sub) > 0:
+        gender_act_encoded = gender_encoder.transform(df_actors_sub[['gender']])
+        gender_act_df = pd.DataFrame(gender_act_encoded,
+                                     columns=['gender_0', 'gender_1', 'gender_2'])
+        df_actors_sub = pd.concat([df_actors_sub.reset_index(drop=True),
+                                   gender_act_df], axis=1)
+        df_actors_sub = df_actors_sub.drop('gender', axis=1)
+
+    if len(df_genres_sub) > 0:
+        genre_encoder = OneHotEncoder(sparse_output=False)
+        genre_encoded = genre_encoder.fit_transform(df_genres_sub[['genre_id']])
+        genre_cols = [f'genre_{int(i)}' for i in genre_encoder.categories_[0]]
+        genre_df = pd.DataFrame(genre_encoded, columns=genre_cols)
+        df_genres_sub = pd.concat([df_genres_sub.reset_index(drop=True),
+                                   genre_df], axis=1)
+        df_genres_sub = df_genres_sub.drop('genre_name', axis=1)
+
+    mappings = {}
+    mappings['user'] = {user_id: idx for idx, user_id in enumerate(df_user_stats_sub['user_id'].unique())}
+    mappings['movie'] = {movie_id: idx for idx, movie_id in enumerate(df_movie_features_sub['movie_id'].unique())}
+    mappings['actor'] = {actor_id: idx for idx, actor_id in enumerate(df_actors_sub['actor_id'].unique())}
+    mappings['director'] = {director_id: idx for idx, director_id in
+                            enumerate(df_directors_sub['director_id'].unique())}
+    mappings['genre'] = {genre_id: idx for idx, genre_id in enumerate(df_genres_sub['genre_id'].unique())}
+
+    data = HeteroData()
+    data['user'].num_nodes = len(mappings['user'])
+    data['movie'].num_nodes = len(mappings['movie'])
+    data['actor'].num_nodes = len(mappings['actor'])
+    data['director'].num_nodes = len(mappings['director'])
+    data['genre'].num_nodes = len(mappings['genre'])
+
+    def add_node_features(df, node_type, id_col, mapping, data_obj):
+        if len(df) == 0:
+            return
+
+        features_list = []
+        feature_cols = [col for col in df.columns if col != id_col]
+        sorted_ids = sorted(mapping.keys(), key=lambda x: mapping[x])
+        for node_id in sorted_ids:
+            row = df[df[id_col] == node_id]
+            if len(row) > 0:
+                features = row[feature_cols].values[0].astype(np.float32)
+                features_list.append(features)
+            else:
+                features_list.append(np.zeros(len(feature_cols), dtype=np.float32))
+        data_obj[node_type].x = torch.tensor(np.array(features_list), dtype=torch.float32)
+
+    add_node_features(df_user_stats_sub, 'user', 'user_id', mappings['user'], data)
+    add_node_features(df_movie_features_sub, 'movie', 'movie_id', mappings['movie'], data)
+    add_node_features(df_actors_sub, 'actor', 'actor_id', mappings['actor'], data)
+    add_node_features(df_directors_sub, 'director', 'director_id', mappings['director'], data)
+    add_node_features(df_genres_sub, 'genre', 'genre_id', mappings['genre'], data)
+
+    def add_edges(df, source_type, target_type, source_col, target_col,
+                  edge_type_name, data_obj, mappings_dict, weight_col=None):
+        if len(df) == 0:
+            return
+
+        edges = []
+        weights = [] if weight_col is not None else None
+        for _, row in df.iterrows():
+            source_idx = mappings_dict[source_type].get(row[source_col])
+            target_idx = mappings_dict[target_type].get(row[target_col])
+            if source_idx is not None and target_idx is not None:
+                edges.append([source_idx, target_idx])
+                if weight_col is not None:
+                    weights.append(row[weight_col])
+
+        if edges:
+            edge_tensor = torch.tensor(edges, dtype=torch.long).t().contiguous()
+            data_obj[source_type, edge_type_name, target_type].edge_index = edge_tensor
+            if weights is not None:
+                data_obj[source_type, edge_type_name, target_type].edge_weight = torch.tensor(
+                    weights, dtype=torch.float32
+                )
+
+    add_edges(df_user_movie_sub, 'user', 'movie', 'user_id', 'movie_id',
+              'rates', data, mappings, weight_col='rating')
+    add_edges(df_movie_genre_sub, 'movie', 'genre', 'movie_id', 'genre_id',
+              'has_genre', data, mappings)
+    add_edges(df_movie_director_sub, 'movie', 'director', 'movie_id', 'director_id',
+              'has_director', data, mappings)
+    add_edges(df_movie_actor_sub, 'movie', 'actor', 'movie_id', 'actor_id',
+              'has_actor', data, mappings, weight_col='weight')
+
+    edge_types_to_reverse = [
+        ('movie', 'has_genre', 'genre'),
+        ('movie', 'has_director', 'director'),
+        ('movie', 'has_actor', 'actor'),
+        ('user', 'rates', 'movie')
+    ]
+
+    for src, rel, dst in edge_types_to_reverse:
+        if hasattr(data[src, rel, dst], 'edge_index'):
+            reverse_edges = data[src, rel, dst].edge_index[[1, 0]]
+            rev_rel = f'rev_{rel}'
+            data[dst, rev_rel, src].edge_index = reverse_edges
+            if hasattr(data[src, rel, dst], 'edge_weight'):
+                data[dst, rev_rel, src].edge_weight = data[src, rel, dst].edge_weight
+
+    print(f'\nConstructed graph with the following structure:')
+    print(f'Nodes: {data.node_types}')
+    print(f'Edges: {data.edge_types}')
+    print(f'\nChecking node features:')
+
+    for node_type in data.node_types:
+        if hasattr(data[node_type], 'x'):
+            print(f'  {node_type}: {data[node_type].x.shape}')
+
+    print(f'\nChecking edges:')
+    for edge_type in data.edge_types:
+        if hasattr(data[edge_type], 'edge_index'):
+            print(f'  {edge_type}: {data[edge_type].edge_index.shape[1]} edges')
+    return data, mappings, df_user_movie_sub
+
+```
+
+#### 3.1.5 Cosine Similarity Graph
 
 We construct a kNN graph using cosine distance on the combined sparse features. For each movie, we connect to its top-$k$ neighbors (excluding self), creating edges with weights $w_{ij} = 1 - d_{ij}$ where $d_{ij}$ is the cosine distance between movies $i$ and $j$. We use $k=20$ neighbors per node.
 
@@ -171,7 +389,7 @@ edges_df.to_csv('processed_data/movie_similarity_graph.csv', index=False)
 
 The cosine metric works well with high-dimensional sparse TF-IDF features. The resulting graph is directed by construction but can be symmetrized if needed.
 
-#### 3.1.5 UMAP-Style Fuzzy Graph
+#### 3.1.6 UMAP-Style Fuzzy Graph
 
 The second approach applies UMAP-style fuzzy weighting to create more informative edge weights that adapt to local density. This method prevents dense regions from becoming over-connected while ensuring sparse regions maintain adequate connectivity.
 
@@ -242,20 +460,22 @@ This approach yields smoother, locally balanced neighborhoods that better reflec
 
 *Image credit: [UMAP Documentation](https://umap-learn.readthedocs.io/en/latest/how_umap_works.html)*
 
-#### 3.1.6 Zero Weights Truncation
+#### 3.1.7 Computational Efficiency
 
-For computational efficiency, we drop zero-weight edges and save compact versions for downstream training:
+For computational efficiency of **the similarity graphs**, we drop zero-weight edges and save compact versions for downstream training:
 
 ```python
 edges_final = edges_final[edges_final['weight'] > 0]
 edges_final.to_csv('processed_data/umap_movie_graph_truncated.csv', index=False)
 ```
 
+On the other hand, for the **heterogeneous graph** we sample the users from the initial distribution such that their amount of rated movies lie between `25th` and `75th` percentiles. Then, as was mentioned earlier, the sample is taken over this set. Thus, we obtain the users with "common" amount of rated films that helps us to avoid such cases as cold start (it can be considered as a future implication).
+
 Downstream models can consume either `processed_data/movie_similarity_graph.csv` (cosine-based) or `processed_data/umap_movie_graph_truncated.csv` (UMAP-style affinities).
 
-#### 3.1.7 Implementation Notes
+#### 3.1.8 Implementation Notes
 
-Key parameters to consider:
+Key parameters to consider for **the similarity graphs**:
 
 - **$k$ (neighbors per node)**: 10–50 is typical; higher $k$ increases graph density and computation cost
 - **`max_features` in TF-IDF**: balances vocabulary richness versus memory usage
@@ -265,6 +485,10 @@ Key parameters to consider:
 Reproducibility: scikit-learn's `NearestNeighbors` is deterministic given inputs; randomness primarily arises from sampling and floating-point non-determinism across different BLAS backends.
 
 <! TODO: ADD PICTURE>
+
+Key parameters to consider for **the heterogeneous graph**:
+- **num_negatives**: the parameter should be chosen according to the amount of movies. The higher value leads to more hits and higher computational complexity.
+- **max_users**: the maximal amount of the validation set. The parameter also affects the metrics values. The higher value leads to more hits and higher computational complexity.
 
 ### 3.2 Approaches
 
@@ -483,6 +707,8 @@ We implement two GNN architectures (GCN and GraphSAGE) using PyTorch Geometric t
 **Why GNNs for Recommendation**
 
 GNNs enable label information to propagate across similar movies through the graph structure while learning complex functions of node features and graph neighborhoods. Unlike global smoothing, the model learns these functions end-to-end, potentially capturing non-linear interactions between content features and graph topology.
+
+#### 3.2.3.1 Similarity Graphs
 
 **Graph Construction and PyG Data Object**
 
@@ -726,7 +952,175 @@ Training per-user isolates the impact of graph structure and features for each i
 
 The full code pipeline is available on Google Colab: [GNN Notebook](https://colab.research.google.com/drive/11PyvU3yab5GeIKzuTDZ7hVAdWjyfMpza?usp=sharing)
 
+#### 3.2.3.2 Heterogeneous Graph
+
+**GraphSAGE**
+
+The full implementation is available on Google Colab: [HGGraphSAGE Notebook](https://colab.research.google.com/drive/1LwwobftwE_L56XMSiW61hapOnPz0tNBg?usp=sharing)
+
+This approach obtain the following model:
+
+```python
+class HeteroSAGE(nn.Module):
+    def __init__(
+        self,
+        user_feat_dim,
+        movie_feat_dim,
+        actor_feat_dim,
+        director_feat_dim,
+        genre_feat_dim,
+        hidden_channels=64,
+        out_channels=32
+    ):
+        super().__init__()
+
+        self.user_lin = Linear(user_feat_dim, hidden_channels)
+        self.movie_lin = Linear(movie_feat_dim, hidden_channels)
+        self.actor_lin = Linear(actor_feat_dim, hidden_channels)
+        self.director_lin = Linear(director_feat_dim, hidden_channels)
+        self.genre_lin = Linear(genre_feat_dim, hidden_channels)
+
+        self.conv1 = HeteroConv({
+            ('user', 'rates', 'movie'): SAGEConv(hidden_channels, hidden_channels),
+            ('movie', 'rev_rates', 'user'): SAGEConv(hidden_channels, hidden_channels),
+            ('movie', 'has_genre', 'genre'): SAGEConv(hidden_channels, hidden_channels),
+            ('genre', 'rev_has_genre', 'movie'): SAGEConv(hidden_channels, hidden_channels),
+            ('movie', 'has_director', 'director'): SAGEConv(hidden_channels, hidden_channels),
+            ('director', 'rev_has_director', 'movie'): SAGEConv(hidden_channels, hidden_channels),
+            ('movie', 'has_actor', 'actor'): SAGEConv(hidden_channels, hidden_channels),
+            ('actor', 'rev_has_actor', 'movie'): SAGEConv(hidden_channels, hidden_channels),
+        }, aggr='sum')
+
+        self.conv2 = HeteroConv({
+            ('user', 'rates', 'movie'): SAGEConv(hidden_channels, out_channels),
+            ('movie', 'rev_rates', 'user'): SAGEConv(hidden_channels, out_channels),
+            ('movie', 'has_genre', 'genre'): SAGEConv(hidden_channels, out_channels),
+            ('genre', 'rev_has_genre', 'movie'): SAGEConv(hidden_channels, out_channels),
+            ('movie', 'has_director', 'director'): SAGEConv(hidden_channels, out_channels),
+            ('director', 'rev_has_director', 'movie'): SAGEConv(hidden_channels, out_channels),
+            ('movie', 'has_actor', 'actor'): SAGEConv(hidden_channels, out_channels),
+            ('actor', 'rev_has_actor', 'movie'): SAGEConv(hidden_channels, out_channels),
+        }, aggr='sum')
+
+    def forward(self, x_dict, edge_index_dict):
+        x_dict = {
+            'user': self.user_lin(x_dict['user']),
+            'movie': self.movie_lin(x_dict['movie']),
+            'actor': self.actor_lin(x_dict['actor']),
+            'director': self.director_lin(x_dict['director']),
+            'genre': self.genre_lin(x_dict['genre']),
+        }
+
+        x_dict = self.conv1(x_dict, edge_index_dict)
+        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
+        x_dict = self.conv2(x_dict, edge_index_dict)
+
+        return x_dict['user'], x_dict['movie']
+
+```
+
+* Raw features of each node type (user, movie, actor, etc.) are first transformed via separate linear layers (self.*_lin) into a common feature space of dimension hidden_channels. This allows different feature types to be compared and aggregated.
+
+* For each node, the HeteroConv layer aggregates information from its specific neighbors along defined edge types (e.g., for a 'movie' node, it aggregates from connected 'user', 'genre', 'director', and 'actor' nodes).
+
+* The SAGEConv modules inside HeteroConv perform the actual message passing and aggregation for each relation type, generating updated node embeddings.
+
+* The aggr='sum' specifies that messages from different relation types are summed together for the final update of a node.
+
+* After the first convolutional layer (conv1), a ReLU activation is applied. This process is repeated with a second layer (conv2), which further refines the embeddings and projects them to the final out_channels dimension.
+
+**GraphConv**
+
+The full implementation is available on Google Colab: [HGGraphConv Notebook](https://colab.research.google.com/drive/1UIrxSfTAmkNTzbw-NfMJvJeZmvX2Jx6u?usp=sharing)
+
+```python
+class HeteroGraphConv(nn.Module):
+    def __init__(self,
+                 user_feat_dim,
+                 movie_feat_dim,
+                 actor_feat_dim,
+                 director_feat_dim,
+                 genre_feat_dim,
+                 hidden_channels=64,
+                 out_channels=32,
+                 num_layers=2):
+        super().__init__()
+
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.num_layers = num_layers
+
+        self.user_lin = Linear(user_feat_dim, hidden_channels)
+        self.movie_lin = Linear(movie_feat_dim, hidden_channels)
+        self.actor_lin = Linear(actor_feat_dim, hidden_channels)
+        self.director_lin = Linear(director_feat_dim, hidden_channels)
+        self.genre_lin = Linear(genre_feat_dim, hidden_channels)
+
+        self.convs = nn.ModuleList()
+        for i in range(num_layers):
+            in_channels = hidden_channels
+            out_channels_layer = out_channels if i == num_layers - 1 else hidden_channels
+
+            conv = HeteroConv({
+                ('user', 'rates', 'movie'): GraphConv(in_channels, out_channels_layer),
+                ('movie', 'rev_rates', 'user'): GraphConv(in_channels, out_channels_layer),
+
+                ('movie', 'has_genre', 'genre'): GraphConv(in_channels, out_channels_layer),
+                ('genre', 'rev_has_genre', 'movie'): GraphConv(in_channels, out_channels_layer),
+
+                ('movie', 'has_director', 'director'): GraphConv(in_channels, out_channels_layer),
+                ('director', 'rev_has_director', 'movie'): GraphConv(in_channels, out_channels_layer),
+
+                ('movie', 'has_actor', 'actor'): GraphConv(in_channels, out_channels_layer),
+                ('actor', 'rev_has_actor', 'movie'): GraphConv(in_channels, out_channels_layer),
+            }, aggr='sum')
+
+            self.convs.append(conv)
+
+        self.user_final = Linear(out_channels, out_channels)
+        self.movie_final = Linear(out_channels, out_channels)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, GraphConv)):
+                module.reset_parameters()
+
+    def forward(self, x_dict, edge_index_dict):
+        x_dict = {
+            'user': self.user_lin(x_dict['user']),
+            'movie': self.movie_lin(x_dict['movie']),
+            'actor': self.actor_lin(x_dict['actor']),
+            'director': self.director_lin(x_dict['director']),
+            'genre': self.genre_lin(x_dict['genre']),
+        }
+
+        for i, conv in enumerate(self.convs):
+            x_dict = conv(x_dict, edge_index_dict)
+
+            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
+
+        user_emb = self.user_final(x_dict['user'])
+        movie_emb = self.movie_final(x_dict['movie'])
+
+        return user_emb, movie_emb
+```
+
+GraphConv assumes all neighboring nodes share the same feature space.
+
+When a GraphConv layer processes edge type ('user', 'rates', 'movie'), it:
+
+* Takes user node features (dimension hidden_channels)
+
+* Aggregates from neighboring movie nodes
+
+* Uses the same weight matrix for both source (user) and neighbor (movie) features
+
+
 ### 3.3 Evaluation Protocol
+
+#### 3.3.1 Similarity Graphs
 
 We evaluate all approaches using a per-user train/test split (80/20). For each user, we:
 - Require at least 10 interactions for inclusion
@@ -734,6 +1128,10 @@ We evaluate all approaches using a per-user train/test split (80/20). For each u
 - Ensure test sets have at least 5 items
 
 We report mean metrics across all users: Accuracy, F1-score, Precision, Recall, and ROC-AUC. For GNN approaches, we use stratified sampling to select 500 users that preserve the original distribution of interaction counts, ensuring fair comparison while maintaining computational feasibility.
+
+#### 3.3.1 Heterogeneous Graph
+
+We try to reach the rated movies values near the median of the distribution for each user that leads to the necessary amount of values in each set. The (70/15/15) train/val/test split is performed. Similarly, the ratings are binarized in the same manner. 
 
 ---
 
@@ -755,14 +1153,16 @@ Our comprehensive evaluation compares all three approaches across both graph con
 | UMAP       | GCN      | 0.574    | 0.568   | 0.568   | 0.555     | 0.653   |
 | UMAP       | GraphSAGE| 0.584    | 0.567   | 0.567   | 0.565     | 0.645   |
 | UMAP       | PRC      | 0.556    | 0.668   | 0.555   | 0.556     |**0.894**|
+| HG         | GraphSAGE| **0.974**| 0.548   |**0.974**| 0.450     | 0.700   |
+| HG         | GraphConv| **0.977**| 0.000   | 0.500   | 0.000     | 0.000   |
 
 ### 4.1 Key Findings
 
-**Content-Based Methods Dominate**: The CSR (Content-based with Correct-and-Smooth) approaches achieve the highest accuracy and ROC-AUC scores across both graph types. The base CSR model achieves approximately 71% accuracy and 0.76 ROC-AUC, significantly outperforming GNN-based methods. This suggests that for this dataset, content features (TF-IDF, genres, keywords) provide strong predictive signals that are effectively captured by the factorization-style model.
+**Content-Based Methods Power**: The CSR (Content-based with Correct-and-Smooth) approaches achieve the highest accuracy and ROC-AUC scores across both graph types (cosine and umap-like). The base CSR model achieves approximately 71% accuracy and 0.76 ROC-AUC, significantly outperforming GNN-based methods among similarity graphs. This suggests that for this dataset, content features (TF-IDF, genres, keywords) provide strong predictive signals that are effectively captured by the factorization-style model.
 
 **Correct-and-Smooth Impact**: Interestingly, applying the Correct-and-Smooth refinement to CSR predictions shows mixed results. While it maintains similar accuracy and ROC-AUC, it slightly reduces F1-score and recall, suggesting that the smoothing step may be over-correcting in some cases. The choice of hyperparameters ($\alpha = 0.8$, $\beta = 0.5$, $T = 1$) may benefit from further tuning.
 
-**GNN Performance**: Both GCN and GraphSAGE achieve lower overall performance, with accuracy around 57-60% and ROC-AUC around 0.57-0.60. This is somewhat surprising given the expressive power of GNNs. Several factors may contribute:
+**GNN Performance on Similarity Graphs**: Both GCN and GraphSAGE achieve lower overall performance, with accuracy around 57-60% and ROC-AUC around 0.57-0.60. This is somewhat surprising given the expressive power of GNNs. Several factors may contribute:
 
 1. **Limited Supervision**: Training separate models per user with limited labeled data may not provide sufficient supervision for the GNN to learn effectively.
 
@@ -770,11 +1170,11 @@ Our comprehensive evaluation compares all three approaches across both graph con
 
 3. **Graph Structure**: The similarity graphs may not capture the optimal relationships for recommendation. The kNN construction with $k=20$ may create edges that don't align well with user preferences.
 
-**GraphSAGE vs GCN**: GraphSAGE shows slightly better performance than GCN on the UMAP graph (58.4% vs 57.4% accuracy), while GCN performs slightly better on the cosine graph (59.8% vs 57.8%). This suggests that the choice between these architectures may depend on the graph construction method.
+**GraphSAGE vs GCN**: GraphSAGE shows slightly better performance than GCN on the UMAP graph (58.4% vs 57.4% accuracy), while GCN performs slightly better on the cosine graph (59.8% vs 57.8%). This suggests that the choice between these architectures may depend on the graph construction method. For the heterogeneous graph GCN (GraphConv) significantly distors the features offering the worst quality. However, implementing GraphSAGE provides better results in comparison with the similarity graphs, but also requires more computational time.
 
 **PRC Approach**: The per-user rating propagation method achieves the highest recall (89.6%) but the lowest precision (55.6%), resulting in moderate F1-scores (66.8%). This high recall comes at the cost of many false positives, making it less suitable for applications where precision is critical. However, its simplicity and interpretability make it a valuable baseline.
 
-**Graph Type Comparison**: The performance differences between cosine similarity and UMAP-style graphs are minimal across all approaches. This suggests that for this dataset and task, the simpler cosine similarity construction is sufficient, and the additional complexity of UMAP-style weighting may not provide significant benefits.
+**Graph Type Comparison**: The performance differences between cosine similarity and UMAP-style graphs are minimal across all approaches. The most observable difference is observed with the heterogeneous graph based on GraphSAGE. This suggests that for this dataset and task, the simpler cosine similarity construction is sufficient, and the additional complexity of UMAP-style weighting may not provide significant benefits, and the hard implementation of the heterofeneous graph based on GraphSAGE offers growth in accuracy and roc-auc.
 
 ### 4.2 Computational Considerations
 
@@ -790,7 +1190,7 @@ Our comprehensive study of graph-based movie recommendation reveals several impo
 
 2. **GNNs May Need More Data**: The relatively low performance of GNN approaches suggests they may require more supervision or different training strategies. Future work could explore multi-task learning where a single GNN model learns to predict for all users simultaneously, potentially sharing information across users more effectively.
 
-3. **Graph Construction is Critical**: While our two graph construction methods performed similarly, the choice of similarity metric and edge weighting scheme is crucial. The kNN approach with $k=20$ may not be optimal, and exploring adaptive neighborhood sizes or different similarity metrics could improve performance.
+3. **Graph Construction is Critical**: While our two graph construction methods performed similarly, the choice of similarity metric and edge weighting scheme is crucial. The kNN approach with $k=20$ may not be optimal, and exploring adaptive neighborhood sizes or different similarity metrics could improve performance. For the heterogeneous graph it is important to capture more connections between nodes.
 
 4. **Trade-offs in Evaluation Metrics**: The PRC approach's high recall but low precision illustrates the importance of choosing metrics aligned with application goals. For systems where discovering diverse content is important, high recall may be preferred, while precision-focused systems would benefit more from CSR approaches.
 
